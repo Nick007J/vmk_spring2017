@@ -73,25 +73,48 @@ unsigned int ReadFileToBuffer( HANDLE fileHandle, char buffer[ BUFFER_SIZE ] )
 
 void ParseFile( char* buffer, int bufferSize )
 {
-  // TODO: Ќеобходимо выполнить разбор файла и написать в какой секции располагаетс€ точка входа. 
-  // ¬ывод должен быть в следующем формате 
-  // ## Entry point (<значение точки входа>)
-  // ## In section <индекс секции>, <название секции>
-  // ## Offset in section <смещение относительно начала секции>, <смещение в процентах> %
-  // 
-  // √де смещение в процентах вычисл€етс€ относительно размера секции. Ќапример, если секци€ имеет 
-  // размер 1000, а точка входа располагаетс€ по смещению 400 в ней, то необходимо вывести 40 %.
-  //
-  // ¬се используемые структуры можно посмотреть в заголовочном файле WinNT.h (он уже подключен, так
-  // как указан в Windows.h). Ќапример вам могут потребоватьс€ следующие структуры:
-  //IMAGE_DOS_HEADER заголовок, который используетс€ в системе DOS (сейчас вам в нем потребуетс€ только поле e_lfanew (что оно означает?)
-  //IMAGE_NT_HEADERS заголовок нового формата исполн€емого файла (PE), используемого в Windows NT
-  //IMAGE_FILE_HEADER один из двух заголовков, из которых состоит IMAGE_NT_HEADER, содержит NumberOfSections
-  //IMAGE_OPTIONAL_HEADER второй заголовок IMAGE_NT_HEADER, содержит важные дл€ нас пол€ ImageBase и AddressOfEntryPoint
-  //IMAGE_SECTION_HEADER заголовок секции, в нем содержитс€ название, размер и расположение секции
-  //
-  // Ќе забывайте провер€ть такие пол€ как сигнатуры файлов (ведь надо убедитьс€, что разбираем собственно исполн€емый файл)
-  printf( "Buffer length: %d\nImplement parsing of file\n", bufferSize );
+#define DEBUG_OUTPUT 0
+	IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)buffer;
+	if (dos_header->e_magic != IMAGE_DOS_SIGNATURE)
+		printf("Not a valid DOS header\n");
+	IMAGE_NT_HEADERS* nt_header = (IMAGE_NT_HEADERS*)(buffer + dos_header->e_lfanew);
+	if (nt_header->Signature != IMAGE_NT_SIGNATURE)
+		printf("Not a valid NT signature\n");
+	IMAGE_FILE_HEADER* file_header = &nt_header->FileHeader;
+	WORD nsec = file_header->NumberOfSections;
+	IMAGE_OPTIONAL_HEADER* opt_header = &nt_header->OptionalHeader;
+	if (opt_header->Magic != 0x10B && opt_header->Magic != 0x107)
+		printf("Not a valid Win32 executable\n");
+	DWORD ib = opt_header->ImageBase;
+	DWORD ep = opt_header->AddressOfEntryPoint;
+	printf("Entry point (%X)\n", ep);
+#if DEBUG_OUTPUT
+	printf("Image base (%X)\n", ib);
+#endif
+	IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt_header);
+	for (WORD i = 0; i < nsec; i++, section++) {
+		DWORD va = section->VirtualAddress;
+		DWORD size = section->Misc.VirtualSize;
+#if DEBUG_OUTPUT
+		char* name = (char*)malloc(IMAGE_SIZEOF_SHORT_NAME + 1);
+		memcpy(name, section->Name, IMAGE_SIZEOF_SHORT_NAME);
+		name[IMAGE_SIZEOF_SHORT_NAME] = '\0';
+		printf("Name: %s, Start: %X, Size: %X, End: %X\n", name, va, size, va+size);
+		free(name);
+#endif
+		if (va < ep && ep < va + size) {
+			char* name = (char*)malloc(IMAGE_SIZEOF_SHORT_NAME + 1);
+			memcpy(name, section->Name, IMAGE_SIZEOF_SHORT_NAME);
+			name[IMAGE_SIZEOF_SHORT_NAME] = '\0';
+			printf("In section %d, %s\n", i, name);
+			DWORD offset = (ep - va) * 100 / size;
+			printf("Offset in section %X, %d%%\n", ep - va, offset);
+			free(name);
+			return;
+		}
+	}
+	printf("Section of entry point not found\n");
+    printf("Buffer length: %d\n", bufferSize);
 }
 
 #pragma region __ Print functions __
@@ -110,7 +133,7 @@ void PrintError( char* functionFrom )
                   NULL,
                   errorCode,
                   MAKELANGID( LANG_NEUTRAL, SUBLANG_DEFAULT ),
-                  ( LPTSTR ) &errorMessage,
+                  ( LPSTR ) &errorMessage,
                   0, NULL );
 
   printf( "In function %s, error %d:\n%s", functionFrom, errorCode, errorMessage );
