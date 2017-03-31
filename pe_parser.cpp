@@ -119,7 +119,7 @@ void ParseFile(char* buffer, int bufferSize)
             name[IMAGE_SIZEOF_SHORT_NAME] = '\0';
             printf("In section %d, %s\n", i, name);
             DWORD offset = (ep - va) * 100 / size;
-            printf("Offset in section %X, %d%%\n", ep - va, offset);
+            printf("Offset in section %X, %d %%\n", ep - va, offset);
             free(name);
             return;
         }
