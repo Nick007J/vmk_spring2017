@@ -116,9 +116,9 @@ void ParseFile(char* buffer, int bufferSize)
         printf("Not a valid magic in optional header\n");
         return;
     }
-    printf("Entry point (%X)\n", ep);
+    printf("Entry point (%llX)\n", ep+ib);
 #if DEBUG_OUTPUT
-    printf("Image base (%X)\n", ib);
+    printf("Image base (%llX)\n", ib);
 #endif
     IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt_header);
     for (WORD i = 0; i < nsec; i++, section++) {
