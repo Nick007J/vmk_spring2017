@@ -113,7 +113,7 @@ void ParseFile(char* buffer, int bufferSize)
     for (WORD i = 0; i < nsec; i++, section++) {
         DWORD va = section->VirtualAddress;
         DWORD size = section->Misc.VirtualSize;
-        if (va < ep && ep < va + size) {
+        if (va <= ep && ep < va + size) {
             char* name = (char*)malloc(IMAGE_SIZEOF_SHORT_NAME + 1);
             memcpy(name, section->Name, IMAGE_SIZEOF_SHORT_NAME);
             name[IMAGE_SIZEOF_SHORT_NAME] = '\0';
