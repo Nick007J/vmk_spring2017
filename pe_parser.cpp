@@ -71,24 +71,16 @@ unsigned int ReadFileToBuffer( HANDLE fileHandle, char buffer[ BUFFER_SIZE ] )
   return returnValue;
 }
 
-#define DEBUG_OUTPUT 0
-
 int GetInfoFromNTHeader(void* p_optheader, ULONGLONG* ib, DWORD* ep)
 {
     IMAGE_OPTIONAL_HEADER32* opth32 = (IMAGE_OPTIONAL_HEADER32*)p_optheader;
     if (opth32->Magic == 0x10B || opth32->Magic == 0x107) {
-#if DEBUG_OUTPUT
-        printf("32 bit\n");
-#endif
         *ib = opth32->ImageBase;
         *ep = opth32->AddressOfEntryPoint;
         return 1;
     }
     IMAGE_OPTIONAL_HEADER64* opth64 = (IMAGE_OPTIONAL_HEADER64*)p_optheader;
     if (opth64->Magic == 0x20B) {
-#if DEBUG_OUTPUT
-        printf("64 bit\n");
-#endif
         *ib = opth64->ImageBase;
         *ep = opth64->AddressOfEntryPoint;
         return 1;
@@ -117,20 +109,10 @@ void ParseFile(char* buffer, int bufferSize)
         return;
     }
     printf("Entry point (%llX)\n", ep+ib);
-#if DEBUG_OUTPUT
-    printf("Image base (%llX)\n", ib);
-#endif
     IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt_header);
     for (WORD i = 0; i < nsec; i++, section++) {
         DWORD va = section->VirtualAddress;
         DWORD size = section->Misc.VirtualSize;
-#if DEBUG_OUTPUT
-        char* name = (char*)malloc(IMAGE_SIZEOF_SHORT_NAME + 1);
-        memcpy(name, section->Name, IMAGE_SIZEOF_SHORT_NAME);
-        name[IMAGE_SIZEOF_SHORT_NAME] = '\0';
-        printf("Name: %s, Start: %X, Size: %X, End: %X\n", name, va, size, va+size);
-        free(name);
-#endif
         if (va < ep && ep < va + size) {
             char* name = (char*)malloc(IMAGE_SIZEOF_SHORT_NAME + 1);
             memcpy(name, section->Name, IMAGE_SIZEOF_SHORT_NAME);
