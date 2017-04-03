@@ -1,7 +1,7 @@
 #include <Windows.h>
 #include <stdio.h>
 
-#define BUFFER_SIZE 0x1000
+#define BUFFER_SIZE 0x2000
 
 
 HANDLE GetFileFromArguments( int argc, char** argv );
@@ -71,18 +71,18 @@ unsigned int ReadFileToBuffer( HANDLE fileHandle, char buffer[ BUFFER_SIZE ] )
   return returnValue;
 }
 
-int GetInfoFromNTHeader(void* p_optheader, ULONGLONG* ib, DWORD* ep)
+int GetInfoFromNTHeader(void* p_optheader, ULONGLONG* p_imagebase, DWORD* p_entrypoint)
 {
     IMAGE_OPTIONAL_HEADER32* opth32 = (IMAGE_OPTIONAL_HEADER32*)p_optheader;
-    if (opth32->Magic == 0x10B || opth32->Magic == 0x107) {
-        *ib = opth32->ImageBase;
-        *ep = opth32->AddressOfEntryPoint;
+    if (IMAGE_NT_OPTIONAL_HDR32_MAGIC == opth32->Magic || IMAGE_ROM_OPTIONAL_HDR_MAGIC == opth32->Magic) {
+        *p_imagebase = opth32->ImageBase;
+        *p_entrypoint = opth32->AddressOfEntryPoint;
         return 1;
     }
     IMAGE_OPTIONAL_HEADER64* opth64 = (IMAGE_OPTIONAL_HEADER64*)p_optheader;
-    if (opth64->Magic == 0x20B) {
-        *ib = opth64->ImageBase;
-        *ep = opth64->AddressOfEntryPoint;
+    if (IMAGE_NT_OPTIONAL_HDR64_MAGIC == opth64->Magic) {
+        *p_imagebase = opth64->ImageBase;
+        *p_entrypoint = opth64->AddressOfEntryPoint;
         return 1;
     }
     return 0;
@@ -91,35 +91,35 @@ int GetInfoFromNTHeader(void* p_optheader, ULONGLONG* ib, DWORD* ep)
 void ParseFile(char* buffer, int bufferSize)
 {
     IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)buffer;
-    if (dos_header->e_magic != IMAGE_DOS_SIGNATURE) {
+    if (IMAGE_DOS_SIGNATURE != dos_header->e_magic) {
         printf("Not a valid DOS header\n");
         return;
     }
     IMAGE_NT_HEADERS* nt_header = (IMAGE_NT_HEADERS*)(buffer + dos_header->e_lfanew);
-    if (nt_header->Signature != IMAGE_NT_SIGNATURE) {
+    if (IMAGE_NT_SIGNATURE != nt_header->Signature) {
         printf("Not a valid NT signature\n");
         return;
     }
     IMAGE_FILE_HEADER* file_header = &nt_header->FileHeader;
     WORD nsec = file_header->NumberOfSections;
-    ULONGLONG ib;
-    DWORD ep;
-    if (!GetInfoFromNTHeader(&nt_header->OptionalHeader, &ib, &ep)) {
+    ULONGLONG image_base;
+    DWORD entry_point;
+    if (!GetInfoFromNTHeader(&nt_header->OptionalHeader, &image_base, &entry_point)) {
         printf("Not a valid magic in optional header\n");
         return;
     }
-    printf("Entry point (%llX)\n", ep+ib);
+    printf("Entry point (%llX)\n", entry_point + image_base);
     IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt_header);
     for (WORD i = 0; i < nsec; i++, section++) {
-        DWORD va = section->VirtualAddress;
+        DWORD virt_address = section->VirtualAddress;
         DWORD size = section->Misc.VirtualSize;
-        if (va <= ep && ep < va + size) {
+        if (virt_address <= entry_point && entry_point < virt_address + size) {
             char* name = (char*)malloc(IMAGE_SIZEOF_SHORT_NAME + 1);
             memcpy(name, section->Name, IMAGE_SIZEOF_SHORT_NAME);
             name[IMAGE_SIZEOF_SHORT_NAME] = '\0';
             printf("In section %d, %s\n", i, name);
-            DWORD offset = (ep - va) * 100 / size;
-            printf("Offset in section %X, %d %%\n", ep - va, offset);
+            DWORD offset = (entry_point - virt_address) * 100 / size;
+            printf("Offset in section %X, %d %%\n", entry_point - virt_address, offset);
             free(name);
             return;
         }
