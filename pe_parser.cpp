@@ -1,28 +1,34 @@
 #include <Windows.h>
 #include <stdio.h>
 
-#define BUFFER_SIZE 0x2000
+#define BUFFER_SIZE 0x1000
+#define CYRILLIC_CODE_PAGE 1251
 
 
 HANDLE GetFileFromArguments( int argc, char** argv );
-unsigned int ReadFileToBuffer( HANDLE fileHandle, char buffer[ BUFFER_SIZE ] );
+unsigned int ReadFileToBuffer( HANDLE fileHandle, char* buffer, unsigned int size );
 void PrintHelp( char* programName );
 void PrintError( char* functionFrom );
-void ParseFile( char* buffer, int bufferSize );
+void ParseFile( char* buffer, unsigned int bufferSize, HANDLE* file_handle );
 
 int main( int argc, char** argv )
 {
+  UINT codePage = GetConsoleOutputCP();
+  SetConsoleOutputCP(CYRILLIC_CODE_PAGE); // set code page to display russian symbols
+
   HANDLE fileHandle = GetFileFromArguments( argc, argv );
   if( NULL != fileHandle )
   {
     char buffer[ BUFFER_SIZE ];
-    int readSize = ReadFileToBuffer( fileHandle, buffer );
-    CloseHandle( fileHandle );
+    unsigned int readSize = ReadFileToBuffer( fileHandle, buffer, BUFFER_SIZE );   
     if( 0x00 != readSize )
     {
-      ParseFile( buffer, readSize );
+      ParseFile( buffer, readSize, &fileHandle );
     }
+    CloseHandle(fileHandle);
   }
+
+  SetConsoleOutputCP(codePage);  // restore code page
   return 0x00;
 }
 
@@ -44,7 +50,7 @@ HANDLE GetFileFromArguments( int argc, char** argv )
   return fileHandle;
 }
 
-unsigned int ReadFileToBuffer( HANDLE fileHandle, char buffer[ BUFFER_SIZE ] )
+unsigned int ReadFileToBuffer( HANDLE fileHandle, char* buffer, unsigned int size )
 {
   unsigned int returnValue = 0x00;
   if( NULL != fileHandle )
@@ -57,7 +63,8 @@ unsigned int ReadFileToBuffer( HANDLE fileHandle, char buffer[ BUFFER_SIZE ] )
     else
     {
       unsigned long bytesRead;
-      fileSize = min( fileSize, BUFFER_SIZE );
+      fileSize = min( fileSize, size );
+      SetFilePointer( fileHandle, 0, NULL, FILE_BEGIN );
       if( true == ReadFile( fileHandle, buffer, fileSize, &bytesRead, NULL ) )
       {
         returnValue = bytesRead;
@@ -71,31 +78,43 @@ unsigned int ReadFileToBuffer( HANDLE fileHandle, char buffer[ BUFFER_SIZE ] )
   return returnValue;
 }
 
-int GetInfoFromNTHeader(void* p_optheader, ULONGLONG* p_imagebase, DWORD* p_entrypoint)
+int GetInfoFromNTHeader(void* opt_header, ULONGLONG* image_base, DWORD* entry_point)
 {
-    IMAGE_OPTIONAL_HEADER32* opth32 = (IMAGE_OPTIONAL_HEADER32*)p_optheader;
+    IMAGE_OPTIONAL_HEADER32* opth32 = (IMAGE_OPTIONAL_HEADER32*)opt_header;
     if (IMAGE_NT_OPTIONAL_HDR32_MAGIC == opth32->Magic || IMAGE_ROM_OPTIONAL_HDR_MAGIC == opth32->Magic) {
-        *p_imagebase = opth32->ImageBase;
-        *p_entrypoint = opth32->AddressOfEntryPoint;
+        *image_base = opth32->ImageBase;
+        *entry_point = opth32->AddressOfEntryPoint;
         return 1;
     }
-    IMAGE_OPTIONAL_HEADER64* opth64 = (IMAGE_OPTIONAL_HEADER64*)p_optheader;
+    IMAGE_OPTIONAL_HEADER64* opth64 = (IMAGE_OPTIONAL_HEADER64*)opt_header;
     if (IMAGE_NT_OPTIONAL_HDR64_MAGIC == opth64->Magic) {
-        *p_imagebase = opth64->ImageBase;
-        *p_entrypoint = opth64->AddressOfEntryPoint;
+        *image_base = opth64->ImageBase;
+        *entry_point = opth64->AddressOfEntryPoint;
         return 1;
     }
     return 0;
 }
 
-void ParseFile(char* buffer, int bufferSize)
+void ParseFile(char* buffer, unsigned int buffer_size, HANDLE* file_handle)
 {
+    bool memory_allocated = false;
     IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)buffer;
     if (IMAGE_DOS_SIGNATURE != dos_header->e_magic) {
         printf("Not a valid DOS header\n");
         return;
     }
     IMAGE_NT_HEADERS* nt_header = (IMAGE_NT_HEADERS*)(buffer + dos_header->e_lfanew);
+    if ((unsigned int)nt_header - (unsigned int)buffer + sizeof(IMAGE_NT_HEADERS) > buffer_size) {
+        unsigned int required_size = ((unsigned int)nt_header - (unsigned int)buffer + sizeof(IMAGE_NT_HEADERS) / BUFFER_SIZE) * (BUFFER_SIZE + 1);
+        buffer = (char*)malloc(required_size);
+        memory_allocated = true;
+        buffer_size = ReadFileToBuffer(*file_handle, buffer, required_size);
+        nt_header = (IMAGE_NT_HEADERS*)(buffer + dos_header->e_lfanew);
+        if (buffer_size < (unsigned int)nt_header - (unsigned int)buffer + sizeof(IMAGE_NT_HEADERS)) {
+            printf("File doesn't contain correct NT header\n");
+            return;
+        }
+    }
     if (IMAGE_NT_SIGNATURE != nt_header->Signature) {
         printf("Not a valid NT signature\n");
         return;
@@ -110,22 +129,42 @@ void ParseFile(char* buffer, int bufferSize)
     }
     printf("Entry point (%llX)\n", entry_point + image_base);
     IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt_header);
+    if ((unsigned int)section - (unsigned int)buffer + sizeof(IMAGE_SECTION_HEADER)*nsec > buffer_size) {
+        unsigned int required_size = ((unsigned int)section - (unsigned int)buffer + sizeof(IMAGE_SECTION_HEADER)*nsec / BUFFER_SIZE) * (BUFFER_SIZE + 1);
+        if (memory_allocated)
+            free(buffer);
+        buffer = (char*)malloc(required_size);
+        buffer_size = ReadFileToBuffer(*file_handle, buffer, required_size);
+        section = IMAGE_FIRST_SECTION((IMAGE_NT_HEADERS*)(buffer + (((IMAGE_DOS_HEADER*)buffer)->e_lfanew)));
+        if (buffer_size < (int)section - (int)buffer + sizeof(IMAGE_SECTION_HEADER)*nsec) {
+            printf("Header doesn't contain all sections\n");
+            return;
+        }
+    }
     for (WORD i = 0; i < nsec; i++, section++) {
         DWORD virt_address = section->VirtualAddress;
         DWORD size = section->Misc.VirtualSize;
+        char* name = (char*)malloc(IMAGE_SIZEOF_SHORT_NAME + 1);
+        memcpy(name, section->Name, IMAGE_SIZEOF_SHORT_NAME);
+        name[IMAGE_SIZEOF_SHORT_NAME] = '\0';
+        printf("Name: %s, Start: %X, Size: %X, End: %X\n", name, virt_address, size, virt_address + size);
+        free(name);
         if (virt_address <= entry_point && entry_point < virt_address + size) {
             char* name = (char*)malloc(IMAGE_SIZEOF_SHORT_NAME + 1);
             memcpy(name, section->Name, IMAGE_SIZEOF_SHORT_NAME);
             name[IMAGE_SIZEOF_SHORT_NAME] = '\0';
             printf("In section %d, %s\n", i, name);
             DWORD offset = (entry_point - virt_address) * 100 / size;
-            printf("Offset in section %X, %d %%\n", entry_point - virt_address, offset);
+            printf("Offset in section %lX, %ld %%\n", entry_point - virt_address, offset);
             free(name);
-            return;
+            goto cleanup;
         }
     }
     printf("Section of entry point not found\n");
-    printf("Buffer length: %d\n", bufferSize);
+    printf("Buffer length: %d\n", buffer_size);
+cleanup:
+    if (memory_allocated)
+        free(buffer);
 }
 
 #pragma region __ Print functions __
