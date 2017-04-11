@@ -1,23 +1,15 @@
-﻿#include "pe_parser.h"
-
-#define DEBUG_OUTPUT 0
+#include "pe_parser.h"
 
 int GetInfoFromNTHeader(void* opt_header, ULONGLONG* image_base, DWORD** entry_point)
 {
     IMAGE_OPTIONAL_HEADER32* opth32 = (IMAGE_OPTIONAL_HEADER32*)opt_header;
     if (IMAGE_NT_OPTIONAL_HDR32_MAGIC == opth32->Magic || IMAGE_ROM_OPTIONAL_HDR_MAGIC == opth32->Magic) {
-#if DEBUG_OUTPUT
-        printf("32 bit\n");
-#endif
         *image_base = opth32->ImageBase;
         *entry_point = &opth32->AddressOfEntryPoint;
         return 1;
     }
     IMAGE_OPTIONAL_HEADER64* opth64 = (IMAGE_OPTIONAL_HEADER64*)opt_header;
     if (IMAGE_NT_OPTIONAL_HDR64_MAGIC == opth64->Magic) {
-#if DEBUG_OUTPUT
-        printf("64 bit\n");
-#endif
         *image_base = opth64->ImageBase;
         *entry_point = &opth64->AddressOfEntryPoint;
         return 1;
@@ -78,30 +70,13 @@ void FixSectionRawData(IMAGE_NT_HEADERS* ntHeader, WORD numSections, DWORD rawAd
     }
 }
 
+DWORD AlignAddress(DWORD original, DWORD alignment)
+{
+    return (original / alignment + 1) * alignment;
+}
+
 void ChangeEntryPoint( char* buffer, DWORD bufferSize, char* originalFilename )
 {
-  // TODO: Необходимо изменить точку входа в программу (AddressOfEntryPoint).
-  // Поддерживаются только 32-разрядные файлы (или можете написать свой код точки входа для 64-разрядных)
-  // Варианты размещения новой точки входа - в каверне имеющихся секций, в расширеннной области 
-  // секций или в новой секции. Подробнее:
-  //    Каверна секции - это разница между SizeOfRawData и VirtualSize. Так как секция хранится
-  //      на диске с выравниванием FileAlignment (обычно по размеру сектора, 0x200 байт), а в VirtualSize 
-  //      указан точный размер секции в памяти, то получается, что на диске хранится лишних
-  //      ( SizeOfRawData - VirtualSize ) байт. Их можно использовать.
-  //    Расширенная область секции - так как в памяти секции выравниваются по значению SectionAlignment 
-  //      (обычно по размеру страницы, 0x1000), то следующая секция начинается с нового SectionAlignment.
-  //      Например, если SectionAlignment равен 0x1000, а секция занимает всего 0x680 байт, то в памяти будет
-  //      находится еще 0x980 нулевых байт. То есть секцию можно расширить (как в памяти, так и на диске)
-  //      и записать в нее данные.
-  //    Новая секция - вы можете создать новую секцию (если места для еще одного заголовка секции достаточно)
-  //      Легче всего добавить последнюю секцию. Необходимо помнить о всех сопутствующих добавлению новой секции 
-  //      изменениях: заголовок секции, атрибуты секции, поле NumberOfSections в IMAGE_FILE_HEADER и т.д.
-  // После выбора места для размещения необходимо получить код для записи в файл. Для этого можно 
-  // воспользоваться функцией GetEntryPointCodeSmall. Она возвращает структуру ENTRY_POINT_CODE, ее описание
-  // находится в заголовочном файле. Необходимо проверить, что код был успешно сгенерирован. После чего
-  // записать новую точку входа в выбранное место. После этого вызвать функцию WriteFileFromBuffer. Имя файла 
-  // можно сформировать по имени исходного файла (originalFilename). 
-  // 
     IMAGE_NT_HEADERS* ntHeader;
     if (!GetNTHeader(buffer, bufferSize, &ntHeader))
         return;
@@ -112,21 +87,31 @@ void ChangeEntryPoint( char* buffer, DWORD bufferSize, char* originalFilename )
         return;
     }
     IMAGE_FILE_HEADER* fileHeader = &ntHeader->FileHeader;
-    WORD nsec = fileHeader->NumberOfSections;
-    IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(ntHeader);
-    if ((unsigned int)section - (unsigned int)buffer + sizeof(IMAGE_SECTION_HEADER)*nsec > bufferSize) {
+    WORD* nsec = &fileHeader->NumberOfSections;
+    if ((unsigned int)IMAGE_FIRST_SECTION(ntHeader) - (unsigned int)buffer + sizeof(IMAGE_SECTION_HEADER) * *nsec > bufferSize) {
         printf(WRONG_NUMBER_OF_SECTIONS);
         return;
     }
+    IMAGE_SECTION_HEADER* j = IMAGE_FIRST_SECTION(ntHeader);
+    IMAGE_SECTION_HEADER* section = NULL;
     WORD i;
-    for (i = 0; i < nsec; i++, section++) {
-        DWORD virtAddress = section->VirtualAddress;
-        DWORD size = section->Misc.VirtualSize;
+    DWORD firstFileAddress = MAXDWORD;
+    DWORD lastVirtualAddress = 0;
+    DWORD sizeOfLastSection = 0;
+    for (i = 0; i < *nsec; i++, j++) {
+        DWORD virtAddress = j->VirtualAddress;
+        DWORD size = j->Misc.VirtualSize;
         if (virtAddress <= *entryPoint && *entryPoint < virtAddress + size) {
-            break;
+            section = j;
+        }
+        if (j->PointerToRawData < firstFileAddress)
+            firstFileAddress = j->PointerToRawData;
+        if (j->VirtualAddress > lastVirtualAddress) {
+            lastVirtualAddress = j->VirtualAddress;
+            sizeOfLastSection = j->Misc.VirtualSize;
         }
     }
-    if (i == nsec) {
+    if (section == NULL) {
         printf(SECTION_NOT_FOUND);
         return;
     }
@@ -149,21 +134,49 @@ void ChangeEntryPoint( char* buffer, DWORD bufferSize, char* originalFilename )
     }
     //strategy2
     if (virtSize % sectAlign + code.sizeOfCode <= sectAlign) {
-        unsigned int newbufSize = bufferSize + (code.sizeOfCode / rawAlign + 1) * rawAlign;
+        unsigned int newbufSize = bufferSize + AlignAddress(code.sizeOfCode, rawAlign);
         *entryPoint = section->VirtualAddress + sizeRaw;
-        FixSectionRawData(ntHeader, nsec, section->PointerToRawData + section->SizeOfRawData, (code.sizeOfCode / rawAlign + 1) * rawAlign);
-        section->SizeOfRawData += (code.sizeOfCode / rawAlign + 1) * rawAlign;
+        FixSectionRawData(ntHeader, *nsec, section->PointerToRawData + section->SizeOfRawData, AlignAddress(code.sizeOfCode, rawAlign));
+        section->SizeOfRawData += AlignAddress(code.sizeOfCode, rawAlign);
         char* newbuf = (char*)malloc(newbufSize);
         memcpy(newbuf, buffer, section->PointerToRawData + sizeRaw);
         memcpy(newbuf + section->PointerToRawData + sizeRaw, code.code, code.sizeOfCode);
         memset(newbuf + section->PointerToRawData + sizeRaw + code.sizeOfCode, 0, rawAlign - code.sizeOfCode);
-        memcpy(newbuf + section->PointerToRawData + sizeRaw + (code.sizeOfCode / rawAlign + 1) * rawAlign, buffer + section->PointerToRawData + sizeRaw, bufferSize - (section->PointerToRawData + sizeRaw));
+        memcpy(newbuf + section->PointerToRawData + sizeRaw + AlignAddress(code.sizeOfCode, rawAlign), buffer + section->PointerToRawData + sizeRaw, bufferSize - (section->PointerToRawData + sizeRaw));
         WriteNewFile(originalFilename, newbuf, newbufSize);
         free(newbuf);
         return;
     }
     //strategy3
-    printf("Not implemented\n");
+    if (firstFileAddress >= ((char*)j - buffer) + sizeof(IMAGE_SECTION_HEADER)) {
+        memcpy(j->Name, ".altext\0", 8);
+        j->VirtualAddress = (sizeOfLastSection % sectAlign == 0 ? sizeOfLastSection : AlignAddress(sizeOfLastSection, sectAlign)) + lastVirtualAddress;
+        ENTRY_POINT_CODE code = GetEntryPointCodeSmall(j->VirtualAddress, *entryPoint);
+        if (!CheckValidityOfEntryPointCode(&code)) {
+            printf(CODE_NOT_GENERATED);
+            return;
+        }
+        j->Misc.VirtualSize = code.sizeOfCode;
+        j->SizeOfRawData = AlignAddress(code.sizeOfCode, rawAlign);
+        j->PointerToRawData = bufferSize;
+        j->PointerToRelocations = 0;
+        j->PointerToLinenumbers = 0;
+        j->NumberOfRelocations = 0;
+        j->NumberOfLinenumbers = 0;
+        j->Characteristics = section->Characteristics;
+        (*nsec)++;
+        *entryPoint = j->VirtualAddress;
+        ntHeader->OptionalHeader.SizeOfHeaders += sizeof(section);
+        ntHeader->OptionalHeader.SizeOfImage += AlignAddress(code.sizeOfCode, sectAlign);
+        char* newbuf = (char*)malloc(bufferSize + j->SizeOfRawData);
+        memcpy(newbuf, buffer, bufferSize);
+        memcpy(newbuf + bufferSize, code.code, code.sizeOfCode);
+        memset(newbuf + bufferSize + code.sizeOfCode, 0, j->SizeOfRawData - code.sizeOfCode);
+        WriteNewFile(originalFilename, newbuf, bufferSize + j->SizeOfRawData);
+        free(newbuf);
+        return;
+    }
+    printf(NO_STRATEGY_FOUND);
 }
 
 ENTRY_POINT_CODE GetEntryPointCodeSmall( DWORD rvaToNewEntryPoint, DWORD rvaToOriginalEntryPoint )
