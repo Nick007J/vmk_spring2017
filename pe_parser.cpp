@@ -1,203 +1,205 @@
-#include <Windows.h>
-#include <stdio.h>
+﻿#include "pe_parser.h"
 
-#define BUFFER_SIZE 0x1000
-#define CYRILLIC_CODE_PAGE 1251
+#define DEBUG_OUTPUT 0
 
-
-HANDLE GetFileFromArguments( int argc, char** argv );
-unsigned int ReadFileToBuffer( HANDLE fileHandle, char* buffer, unsigned int size );
-void PrintHelp( char* programName );
-void PrintError( char* functionFrom );
-void ParseFile( char* buffer, unsigned int bufferSize, HANDLE* file_handle );
-
-int main( int argc, char** argv )
-{
-  UINT codePage = GetConsoleOutputCP();
-  SetConsoleOutputCP(CYRILLIC_CODE_PAGE); // set code page to display russian symbols
-
-  HANDLE fileHandle = GetFileFromArguments( argc, argv );
-  if( NULL != fileHandle )
-  {
-    char buffer[ BUFFER_SIZE ];
-    unsigned int readSize = ReadFileToBuffer( fileHandle, buffer, BUFFER_SIZE );   
-    if( 0x00 != readSize )
-    {
-      ParseFile( buffer, readSize, &fileHandle );
-    }
-    CloseHandle(fileHandle);
-  }
-
-  SetConsoleOutputCP(codePage);  // restore code page
-  return 0x00;
-}
-
-HANDLE GetFileFromArguments( int argc, char** argv )
-{
-  HANDLE fileHandle = NULL;
-  if( 0x02 == argc )
-  {
-    fileHandle = CreateFileA( argv[ 0x01 ], GENERIC_READ, NULL, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
-    if( INVALID_HANDLE_VALUE == fileHandle )
-    {
-      PrintError( "CreateFileA" );
-    }
-  }
-  else
-  {
-    PrintHelp( argv[ 0x00 ] );
-  }
-  return fileHandle;
-}
-
-unsigned int ReadFileToBuffer( HANDLE fileHandle, char* buffer, unsigned int size )
-{
-  unsigned int returnValue = 0x00;
-  if( NULL != fileHandle )
-  {
-    unsigned int fileSize = GetFileSize( fileHandle, NULL );
-    if( INVALID_FILE_SIZE == fileSize )
-    {
-      PrintError( "GetFileSize" );
-    }
-    else
-    {
-      unsigned long bytesRead;
-      fileSize = min( fileSize, size );
-      SetFilePointer( fileHandle, 0, NULL, FILE_BEGIN );
-      if( true == ReadFile( fileHandle, buffer, fileSize, &bytesRead, NULL ) )
-      {
-        returnValue = bytesRead;
-      }
-      else
-      {
-        PrintError( "ReadFile" );
-      }
-    }
-  }
-  return returnValue;
-}
-
-int GetInfoFromNTHeader(void* opt_header, ULONGLONG* image_base, DWORD* entry_point)
+int GetInfoFromNTHeader(void* opt_header, ULONGLONG* image_base, DWORD** entry_point)
 {
     IMAGE_OPTIONAL_HEADER32* opth32 = (IMAGE_OPTIONAL_HEADER32*)opt_header;
     if (IMAGE_NT_OPTIONAL_HDR32_MAGIC == opth32->Magic || IMAGE_ROM_OPTIONAL_HDR_MAGIC == opth32->Magic) {
+#if DEBUG_OUTPUT
+        printf("32 bit\n");
+#endif
         *image_base = opth32->ImageBase;
-        *entry_point = opth32->AddressOfEntryPoint;
+        *entry_point = &opth32->AddressOfEntryPoint;
         return 1;
     }
     IMAGE_OPTIONAL_HEADER64* opth64 = (IMAGE_OPTIONAL_HEADER64*)opt_header;
     if (IMAGE_NT_OPTIONAL_HDR64_MAGIC == opth64->Magic) {
+#if DEBUG_OUTPUT
+        printf("64 bit\n");
+#endif
         *image_base = opth64->ImageBase;
-        *entry_point = opth64->AddressOfEntryPoint;
+        *entry_point = &opth64->AddressOfEntryPoint;
         return 1;
     }
     return 0;
 }
 
-bool ReadFileAgain(unsigned int required_size, unsigned int* new_size, char** buffer, bool* memory_allocated, HANDLE* file_handle)
+bool GetNTHeader(char* buffer, unsigned int bufferSize, IMAGE_NT_HEADERS** header)
 {
-    unsigned int pure_size = (required_size / BUFFER_SIZE + 1) * BUFFER_SIZE;
-    if (*memory_allocated)
-        free(*buffer);
-    *buffer = (char*)malloc(pure_size);
-    *memory_allocated = true;
-    *new_size = ReadFileToBuffer(*file_handle, *buffer, pure_size);
-    if (*new_size < required_size)
+    IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)buffer;
+    if (IMAGE_DOS_SIGNATURE != dos_header->e_magic) {
+        printf(INVALID_DOS_HEADER);
         return false;
+    }
+    IMAGE_NT_HEADERS* nt_header = (IMAGE_NT_HEADERS*)(buffer + dos_header->e_lfanew);
+    if ((unsigned int)nt_header - (unsigned int)buffer + sizeof(IMAGE_NT_HEADERS) > bufferSize) {
+        printf(INVALID_NT_HEADER);
+        return false;
+    }
+    if (IMAGE_NT_SIGNATURE != nt_header->Signature) {
+        printf(INVALID_NT_SIGNATURE);
+        return false;
+    }
+    *header = nt_header;
     return true;
 }
 
-char* GetSectionName(IMAGE_SECTION_HEADER* section)
+bool CheckValidityOfEntryPointCode(ENTRY_POINT_CODE* code)
 {
-    char* new_name = (char*)malloc(IMAGE_SIZEOF_SHORT_NAME + 1);
-    memcpy(new_name, section->Name, IMAGE_SIZEOF_SHORT_NAME);
-    new_name[IMAGE_SIZEOF_SHORT_NAME] = '\0';
-    return new_name;
+    return code->sizeOfCode != 0;
 }
 
-void ParseFile(char* buffer, unsigned int buffer_size, HANDLE* file_handle)
+void WriteNewFile(char* originalFilename, char* buffer, DWORD bufferSize)
 {
-    bool memory_allocated = false;
-    IMAGE_DOS_HEADER* dos_header = (IMAGE_DOS_HEADER*)buffer;
-    if (IMAGE_DOS_SIGNATURE != dos_header->e_magic) {
-        printf("Not a valid DOS header\n");
-        goto cleanup;
+    const char* suffix = "_new";
+    char* newFilename = (char*)malloc(strlen(originalFilename) + strlen(suffix) + 1);
+    char* exePtr = strstr(originalFilename, ".exe");
+    if (exePtr) {
+        memcpy(newFilename, originalFilename, exePtr - originalFilename);
+        memcpy(newFilename + (exePtr - originalFilename), suffix, strlen(suffix));
+        memcpy(newFilename + (exePtr - originalFilename) + strlen(suffix), exePtr, strlen(originalFilename) - (exePtr - originalFilename));
     }
-    IMAGE_NT_HEADERS* nt_header = (IMAGE_NT_HEADERS*)(buffer + dos_header->e_lfanew);
-    if ((unsigned int)nt_header - (unsigned int)buffer + sizeof(IMAGE_NT_HEADERS) > buffer_size) {
-        if (!ReadFileAgain((unsigned int)nt_header - (unsigned int)buffer + sizeof(IMAGE_NT_HEADERS), &buffer_size, &buffer, &memory_allocated, file_handle)) {
-            printf("File doesn't contain correct NT header\n");
-            goto cleanup;
-        }
-        dos_header = (IMAGE_DOS_HEADER*)buffer;
-        nt_header = (IMAGE_NT_HEADERS*)(buffer + dos_header->e_lfanew);
+    else {
+        memcpy(newFilename, originalFilename, strlen(originalFilename));
+        memcpy(newFilename + strlen(originalFilename), suffix, strlen(suffix));
     }
-    if (IMAGE_NT_SIGNATURE != nt_header->Signature) {
-        printf("Not a valid NT signature\n");
-        goto cleanup;
-    }
-    IMAGE_FILE_HEADER* file_header = &nt_header->FileHeader;
-    WORD nsec = file_header->NumberOfSections;
-    ULONGLONG image_base;
-    DWORD entry_point;
-    if (!GetInfoFromNTHeader(&nt_header->OptionalHeader, &image_base, &entry_point)) {
-        printf("Not a valid magic in optional header\n");
-        goto cleanup;
-    }
-    printf("Entry point (%llX)\n", entry_point + image_base);
-    IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(nt_header);
-    if ((unsigned int)section - (unsigned int)buffer + sizeof(IMAGE_SECTION_HEADER)*nsec > buffer_size) {
+    newFilename[strlen(originalFilename) + strlen(suffix)] = '\0';
+    WriteFileFromBuffer(newFilename, buffer, bufferSize);
+    free(newFilename);
+}
 
-        if (!ReadFileAgain(((unsigned int)section - (unsigned int)buffer + sizeof(IMAGE_SECTION_HEADER)*nsec), &buffer_size, &buffer, &memory_allocated, file_handle)) {
-            printf("Header doesn't contain all sections\n");
-            return;
-        }
-        dos_header = (IMAGE_DOS_HEADER*)buffer;
-        nt_header = (IMAGE_NT_HEADERS*)(buffer + dos_header->e_lfanew);
-        section = IMAGE_FIRST_SECTION(nt_header);
+void FixSectionRawData(IMAGE_NT_HEADERS* ntHeader, WORD numSections, DWORD rawAddress, DWORD rawOffset)
+{
+    IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(ntHeader);
+    for (WORD i = 0; i < numSections; i++, section++) {
+        if (section->PointerToRawData >= rawAddress)
+            section->PointerToRawData += rawOffset;
     }
-    for (WORD i = 0; i < nsec; i++, section++) {
-        DWORD virt_address = section->VirtualAddress;
+}
+
+void ChangeEntryPoint( char* buffer, DWORD bufferSize, char* originalFilename )
+{
+  // TODO: Необходимо изменить точку входа в программу (AddressOfEntryPoint).
+  // Поддерживаются только 32-разрядные файлы (или можете написать свой код точки входа для 64-разрядных)
+  // Варианты размещения новой точки входа - в каверне имеющихся секций, в расширеннной области 
+  // секций или в новой секции. Подробнее:
+  //    Каверна секции - это разница между SizeOfRawData и VirtualSize. Так как секция хранится
+  //      на диске с выравниванием FileAlignment (обычно по размеру сектора, 0x200 байт), а в VirtualSize 
+  //      указан точный размер секции в памяти, то получается, что на диске хранится лишних
+  //      ( SizeOfRawData - VirtualSize ) байт. Их можно использовать.
+  //    Расширенная область секции - так как в памяти секции выравниваются по значению SectionAlignment 
+  //      (обычно по размеру страницы, 0x1000), то следующая секция начинается с нового SectionAlignment.
+  //      Например, если SectionAlignment равен 0x1000, а секция занимает всего 0x680 байт, то в памяти будет
+  //      находится еще 0x980 нулевых байт. То есть секцию можно расширить (как в памяти, так и на диске)
+  //      и записать в нее данные.
+  //    Новая секция - вы можете создать новую секцию (если места для еще одного заголовка секции достаточно)
+  //      Легче всего добавить последнюю секцию. Необходимо помнить о всех сопутствующих добавлению новой секции 
+  //      изменениях: заголовок секции, атрибуты секции, поле NumberOfSections в IMAGE_FILE_HEADER и т.д.
+  // После выбора места для размещения необходимо получить код для записи в файл. Для этого можно 
+  // воспользоваться функцией GetEntryPointCodeSmall. Она возвращает структуру ENTRY_POINT_CODE, ее описание
+  // находится в заголовочном файле. Необходимо проверить, что код был успешно сгенерирован. После чего
+  // записать новую точку входа в выбранное место. После этого вызвать функцию WriteFileFromBuffer. Имя файла 
+  // можно сформировать по имени исходного файла (originalFilename). 
+  // 
+    IMAGE_NT_HEADERS* ntHeader;
+    if (!GetNTHeader(buffer, bufferSize, &ntHeader))
+        return;
+    DWORD* entryPoint;
+    ULONGLONG imageBase;
+    if (!GetInfoFromNTHeader(&ntHeader->OptionalHeader, &imageBase, &entryPoint)) {
+        printf(INVALID_OPTIONAL_HEADER_MAGIC);
+        return;
+    }
+    IMAGE_FILE_HEADER* fileHeader = &ntHeader->FileHeader;
+    WORD nsec = fileHeader->NumberOfSections;
+    IMAGE_SECTION_HEADER* section = IMAGE_FIRST_SECTION(ntHeader);
+    if ((unsigned int)section - (unsigned int)buffer + sizeof(IMAGE_SECTION_HEADER)*nsec > bufferSize) {
+        printf(WRONG_NUMBER_OF_SECTIONS);
+        return;
+    }
+    WORD i;
+    for (i = 0; i < nsec; i++, section++) {
+        DWORD virtAddress = section->VirtualAddress;
         DWORD size = section->Misc.VirtualSize;
-        if (virt_address <= entry_point && entry_point < virt_address + size) {
-            char* name = GetSectionName(section);
-            printf("In section %d, %s\n", i, name);
-            DWORD offset = (entry_point - virt_address) * 100 / size;
-            printf("Offset in section %lX, %ld %%\n", entry_point - virt_address, offset);
-            free(name);
-            goto cleanup;
+        if (virtAddress <= *entryPoint && *entryPoint < virtAddress + size) {
+            break;
         }
     }
-    printf("Section of entry point not found\n");
-    printf("Buffer length: %d\n", buffer_size);
-cleanup:
-    if (memory_allocated)
-        free(buffer);
+    if (i == nsec) {
+        printf(SECTION_NOT_FOUND);
+        return;
+    }
+    DWORD sizeRaw = section->SizeOfRawData;
+    DWORD virtSize = section->Misc.VirtualSize;
+    DWORD sectAlign = ntHeader->OptionalHeader.SectionAlignment;
+    DWORD rawAlign = ntHeader->OptionalHeader.FileAlignment;
+    ENTRY_POINT_CODE code = GetEntryPointCodeSmall(section->VirtualAddress + virtSize, *entryPoint);
+    if (!CheckValidityOfEntryPointCode(&code)) {
+        printf(CODE_NOT_GENERATED);
+        return;
+    }
+    // strategy1
+    if (sizeRaw >= virtSize + code.sizeOfCode) {
+        *entryPoint = section->VirtualAddress + virtSize;
+        section->Misc.VirtualSize += code.sizeOfCode;
+        memcpy(buffer + section->PointerToRawData + virtSize, code.code, code.sizeOfCode);
+        WriteNewFile(originalFilename, buffer, bufferSize);
+        return;
+    }
+    //strategy2
+    if (virtSize % sectAlign + code.sizeOfCode <= sectAlign) {
+        unsigned int newbufSize = bufferSize + (code.sizeOfCode / rawAlign + 1) * rawAlign;
+        *entryPoint = section->VirtualAddress + sizeRaw;
+        FixSectionRawData(ntHeader, nsec, section->PointerToRawData + section->SizeOfRawData, (code.sizeOfCode / rawAlign + 1) * rawAlign);
+        section->SizeOfRawData += (code.sizeOfCode / rawAlign + 1) * rawAlign;
+        char* newbuf = (char*)malloc(newbufSize);
+        memcpy(newbuf, buffer, section->PointerToRawData + sizeRaw);
+        memcpy(newbuf + section->PointerToRawData + sizeRaw, code.code, code.sizeOfCode);
+        memset(newbuf + section->PointerToRawData + sizeRaw + code.sizeOfCode, 0, rawAlign - code.sizeOfCode);
+        memcpy(newbuf + section->PointerToRawData + sizeRaw + (code.sizeOfCode / rawAlign + 1) * rawAlign, buffer + section->PointerToRawData + sizeRaw, bufferSize - (section->PointerToRawData + sizeRaw));
+        WriteNewFile(originalFilename, newbuf, newbufSize);
+        free(newbuf);
+        return;
+    }
+    //strategy3
+    printf("Not implemented\n");
 }
 
-#pragma region __ Print functions __
-void PrintHelp( char* programName )
+ENTRY_POINT_CODE GetEntryPointCodeSmall( DWORD rvaToNewEntryPoint, DWORD rvaToOriginalEntryPoint )
 {
-  printf( "Usage:\n%s <filename>", programName );
+  ENTRY_POINT_CODE code;
+  char byteCode[] = { 0xE8, 0x00, 0x00, 0x00, 0x00, 0x50, 0x8B, 0x44, 0x24, 0x04, 0x05, 0x77, 0x77, 0x77, 0x77, 0x89, 0x44, 0x24, 0x04, 0x58, 0xC3 };
+  DWORD offsetToOriginalEntryPoint = rvaToOriginalEntryPoint - rvaToNewEntryPoint - SIZE_OF_CALL_INSTRUCTION;
+  DWORD* positionOfOffsetToOriginalEntryPoint = GetPositionOfPattern( byteCode, sizeof( byteCode ), OFFSET_PATTERN );
+  if( NULL != positionOfOffsetToOriginalEntryPoint )
+  {
+    *positionOfOffsetToOriginalEntryPoint = offsetToOriginalEntryPoint;
+    code.sizeOfCode = sizeof( byteCode );
+    code.code = ( char* ) malloc( code.sizeOfCode );
+    memcpy( code.code, byteCode, code.sizeOfCode );
+  }
+  else
+  {
+    code.code = NULL;
+    code.sizeOfCode = 0x00;
+  }
+  return code;
 }
 
-void PrintError( char* functionFrom )
+DWORD* GetPositionOfPattern( char* buffer, DWORD bufferSize, DWORD pattern )
 {
-  char* errorMessage;
-  DWORD errorCode = GetLastError( );
+  DWORD* foundPosition = NULL;
+  char* position;
+  char* lastPosition = buffer + bufferSize - sizeof( DWORD );
 
-  // Retrieve the system error message for the last-error code
-  FormatMessageA( FORMAT_MESSAGE_ALLOCATE_BUFFER | FORMAT_MESSAGE_FROM_SYSTEM | FORMAT_MESSAGE_IGNORE_INSERTS,
-                  NULL,
-                  errorCode,
-                  MAKELANGID( LANG_NEUTRAL, SUBLANG_DEFAULT ),
-                  ( LPSTR ) &errorMessage,
-                  0, NULL );
-
-  printf( "In function %s, error %d:\n%s", functionFrom, errorCode, errorMessage );
-  LocalFree( errorMessage );
+  for( position = buffer; position <= lastPosition; ++position )
+  {
+    if( *( ( DWORD* ) position ) == pattern )
+    {
+      foundPosition = ( DWORD* ) position;
+      break;
+    }
+  }
+  return foundPosition;
 }
-
-#pragma endregion
-
