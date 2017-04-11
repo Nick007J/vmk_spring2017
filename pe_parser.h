@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <Windows.h>
 #include <stdio.h>
 
@@ -21,6 +21,7 @@
 #define WRONG_NUMBER_OF_SECTIONS "Header doesn't contain all sections\n"
 #define SECTION_NOT_FOUND "Section of entry point not found\n"
 #define CODE_NOT_GENERATED "Code wasn't generated\n"
+#define NO_STRATEGY_FOUND "No strategy for injection found\n"
 #pragma endregion
 
 
