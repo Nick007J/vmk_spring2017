@@ -1,17 +1,17 @@
 #include "pe_parser.h"
 
-int GetInfoFromNTHeader(void* opt_header, ULONGLONG* image_base, DWORD** entry_point)
+int GetInfoFromNTHeader(void* optHeader, ULONGLONG* imageBase, DWORD** entryPoint)
 {
-    IMAGE_OPTIONAL_HEADER32* opth32 = (IMAGE_OPTIONAL_HEADER32*)opt_header;
+    IMAGE_OPTIONAL_HEADER32* opth32 = (IMAGE_OPTIONAL_HEADER32*)optHeader;
     if (IMAGE_NT_OPTIONAL_HDR32_MAGIC == opth32->Magic || IMAGE_ROM_OPTIONAL_HDR_MAGIC == opth32->Magic) {
-        *image_base = opth32->ImageBase;
-        *entry_point = &opth32->AddressOfEntryPoint;
+        *imageBase = opth32->ImageBase;
+        *entryPoint = &opth32->AddressOfEntryPoint;
         return 1;
     }
-    IMAGE_OPTIONAL_HEADER64* opth64 = (IMAGE_OPTIONAL_HEADER64*)opt_header;
+    IMAGE_OPTIONAL_HEADER64* opth64 = (IMAGE_OPTIONAL_HEADER64*)optHeader;
     if (IMAGE_NT_OPTIONAL_HDR64_MAGIC == opth64->Magic) {
-        *image_base = opth64->ImageBase;
-        *entry_point = &opth64->AddressOfEntryPoint;
+        *imageBase = opth64->ImageBase;
+        *entryPoint = &opth64->AddressOfEntryPoint;
         return 1;
     }
     return 0;
