@@ -31,6 +31,17 @@ struct ENTRY_POINT_CODE
   DWORD sizeOfCode;
   char* code;
 };
+
+struct INJECTOR_INFO
+{
+    IMAGE_NT_HEADERS* ntHeader;
+    IMAGE_SECTION_HEADER* execSection;
+    DWORD* entryPoint;
+    DWORD size;
+    DWORD lastVirtualAddress;
+    DWORD sizeOfLastSection;
+    IMAGE_SECTION_HEADER* addSection;
+};
 #pragma endregion
 
 
