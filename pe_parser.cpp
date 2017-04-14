@@ -7,13 +7,13 @@ int GetInfoFromNTHeader(void* optHeader, ULONGLONG* imageBase, DWORD** entryPoin
     if (IMAGE_NT_OPTIONAL_HDR32_MAGIC == opth32->Magic || IMAGE_ROM_OPTIONAL_HDR_MAGIC == opth32->Magic) {
         *imageBase = opth32->ImageBase;
         *entryPoint = &opth32->AddressOfEntryPoint;
-        return 1;
+        return 32;
     }
     IMAGE_OPTIONAL_HEADER64* opth64 = (IMAGE_OPTIONAL_HEADER64*)optHeader;
     if (IMAGE_NT_OPTIONAL_HDR64_MAGIC == opth64->Magic) {
         *imageBase = opth64->ImageBase;
         *entryPoint = &opth64->AddressOfEntryPoint;
-        return 1;
+        return 64;
     }
     return 0;
 }
@@ -159,8 +159,13 @@ void ChangeEntryPoint( char* buffer, DWORD bufferSize, char* originalFilename )
         return;
     DWORD* entryPoint;
     ULONGLONG imageBase;
-    if (!GetInfoFromNTHeader(&ntHeader->OptionalHeader, &imageBase, &entryPoint)) {
+    int arch = GetInfoFromNTHeader(&ntHeader->OptionalHeader, &imageBase, &entryPoint);
+    if (!arch) {
         printf(INVALID_OPTIONAL_HEADER_MAGIC);
+        return;
+    }
+    if (arch == 64) {
+        printf(ARCH_BIT_NOT_SUPPORTED);
         return;
     }
     IMAGE_FILE_HEADER* fileHeader = &ntHeader->FileHeader;
