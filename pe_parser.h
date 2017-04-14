@@ -22,6 +22,7 @@
 #define SECTION_NOT_FOUND "Section of entry point not found\n"
 #define CODE_NOT_GENERATED "Code wasn't generated\n"
 #define NO_STRATEGY_FOUND "No strategy for injection found\n"
+#define ARCH_BIT_NOT_SUPPORTED "Architecture is not supported\n"
 #pragma endregion
 
 
